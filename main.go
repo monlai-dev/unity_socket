@@ -1,10 +1,11 @@
 package main
 
 import (
-	_ "encoding/json"
+	"encoding/json"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
+	"strconv"
 )
 
 var upgrader = websocket.Upgrader{
@@ -19,14 +20,15 @@ type Player struct {
 	Y  float32 `json:"y"`
 }
 
-type Message struct {
-	Type string  `json:"type"`
-	X    float32 `json:"x"`
-	Y    float32 `json:"y"`
+type MoveMessage struct {
+	Type     string  `json:"type"`
+	PlayerID string  `json:"playerId"`
+	X        float32 `json:"x"`
+	Y        float32 `json:"y"`
 }
 
 var players = make(map[*websocket.Conn]Player)
-var broadcast = make(chan Message)
+var broadcast = make(chan MoveMessage)
 
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
@@ -36,38 +38,67 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	defer ws.Close()
 
 	// Register new player
-	player := Player{ID: generateID(), X: 0, Y: 0}
+	playerID := generateID()
+	player := Player{ID: playerID, X: 0, Y: 0}
 	players[ws] = player
 
 	// Send initial state to client
-	ws.WriteJSON(player)
+	err = ws.WriteJSON(player)
+	if err != nil {
+		log.Printf("error sending initial state: %v", err)
+		return
+	}
+	log.Printf("New player connected: %s", playerID)
 
 	// Handle incoming messages
 	for {
-		var msg Message
-		err := ws.ReadJSON(&msg)
+		_, msgBytes, err := ws.ReadMessage()
 		if err != nil {
-			log.Printf("error: %v", err)
+			log.Printf("error reading message: %v", err)
 			delete(players, ws)
 			break
 		}
 
+		var msg MoveMessage
+		err = json.Unmarshal(msgBytes, &msg)
+		if err != nil {
+			log.Printf("error parsing message: %v", err)
+			continue
+		}
+
+		log.Printf("Received message: %+v", msg)
+
 		// Update player position
 		if msg.Type == "move" {
+			player := players[ws]
 			player.X = msg.X
 			player.Y = msg.Y
 			players[ws] = player
-			broadcast <- msg
+
+			// Create broadcast message
+			broadcastMsg := MoveMessage{
+				Type:     "move",
+				PlayerID: player.ID,
+				X:        player.X,
+				Y:        player.Y,
+			}
+
+			broadcast <- broadcastMsg
 		}
 	}
 }
 
 func handleBroadcast() {
 	for msg := range broadcast {
-		for ws, _ := range players {
+		for ws, player := range players {
+			// Don't send message back to originator
+			if player.ID == msg.PlayerID {
+				continue
+			}
+
 			err := ws.WriteJSON(msg)
 			if err != nil {
-				log.Printf("error: %v", err)
+				log.Printf("error broadcasting: %v", err)
 				ws.Close()
 				delete(players, ws)
 			}
@@ -76,7 +107,7 @@ func handleBroadcast() {
 }
 
 func generateID() string {
-	return "player-" + string(rune(len(players)+1))
+	return "player-" + strconv.Itoa(len(players)+1)
 }
 
 func main() {
